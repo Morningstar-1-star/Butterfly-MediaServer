@@ -1,18 +1,5 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import yt_dlp
-
-app = FastAPI(title="Butterfly MediaServer")
-
-class ExtractRequest(BaseModel):
-    url: str
-
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "Butterfly MediaServer"}
-
-@app.post("/extract")
-def extract(req: ExtractRequest):
+@app.get("/extract-test")
+def extract_test(url: str):
     try:
         opts = {
             "quiet": True,
@@ -23,7 +10,7 @@ def extract(req: ExtractRequest):
         }
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
+            info = ydl.extract_info(url, download=False)
 
         return {
             "success": True,
@@ -32,9 +19,6 @@ def extract(req: ExtractRequest):
             "thumbnail": info.get("thumbnail"),
             "duration": info.get("duration"),
             "url": info.get("url"),
-            "ext": info.get("ext"),
-            "width": info.get("width"),
-            "height": info.get("height"),
         }
 
     except Exception as e:
