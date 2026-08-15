@@ -9,6 +9,21 @@ class ExtractRequest(BaseModel):
     url: str
 
 
+def get_opts():
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "format": "best[acodec!=none][vcodec!=none]/best",
+        "extractor_args": {
+            "youtubepot-bgutilhttp": {
+                "base_url": "https://bgutil-ytdlp-pot-provider-hukw.onrender.com"
+            }
+        },
+    }
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "service": "Butterfly MediaServer"}
@@ -17,15 +32,7 @@ def root():
 @app.get("/extract-test")
 def extract_test(url: str):
     try:
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "skip_download": True,
-            "format": "best[acodec!=none][vcodec!=none]/best",
-        }
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(get_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
 
         return {
@@ -44,15 +51,7 @@ def extract_test(url: str):
 @app.post("/extract")
 def extract(req: ExtractRequest):
     try:
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "skip_download": True,
-            "format": "best[acodec!=none][vcodec!=none]/best",
-        }
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(get_opts()) as ydl:
             info = ydl.extract_info(req.url, download=False)
 
         return {
