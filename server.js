@@ -1,31 +1,40 @@
 import express from "express";
 import fs from "fs";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const providersFile = "./providers/index.json";
+const distPath = "./vega-providers/dist";
 
-function getProviders() {
-  try {
-    return JSON.parse(fs.readFileSync(providersFile, "utf8"));
-  } catch {
-    return { version: 1, providers: [] };
-  }
+function getVegaProviders() {
+  if (!fs.existsSync(distPath)) return [];
+
+  return fs.readdirSync(distPath, { withFileTypes: true })
+    .filter(x => x.isDirectory())
+    .map(x => ({
+      id: x.name,
+      modules: fs.readdirSync(path.join(distPath, x.name))
+        .filter(file => file.endsWith(".js"))
+        .map(file => file.replace(".js", ""))
+    }));
 }
 
 app.get("/", (req, res) => {
-  const data = getProviders();
+  const providers = getVegaProviders();
 
   res.json({
     name: "Butterfly Provider Server",
     status: "online",
-    providers: data.providers.length
+    vegaProviders: providers.length
   });
 });
 
 app.get("/providers", (req, res) => {
-  res.json(getProviders());
+  res.json({
+    version: 1,
+    providers: getVegaProviders()
+  });
 });
 
 app.get("/health", (req, res) => {
