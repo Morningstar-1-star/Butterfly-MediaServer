@@ -61,6 +61,29 @@ app.get("/test/:provider/:module", (req, res) => {
   }
 });
 
+app.get("/baseurl/:provider", async (req, res) => {
+  try {
+    const file = path.resolve(
+      distPath,
+      req.params.provider,
+      "meta.js"
+    );
+
+    const mod = require(file);
+
+    res.json({
+      success: true,
+      provider: req.params.provider,
+      loaded: Object.keys(mod)
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
