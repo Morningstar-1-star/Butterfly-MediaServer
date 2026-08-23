@@ -1,13 +1,15 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
+import { createRequire } from "module";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const require = createRequire(import.meta.url);
 
 const distPath = "./vega-providers/dist";
 
-function getVegaProviders() {
+function getProviders() {
   if (!fs.existsSync(distPath)) return [];
 
   return fs.readdirSync(distPath, { withFileTypes: true })
@@ -21,20 +23,42 @@ function getVegaProviders() {
 }
 
 app.get("/", (req, res) => {
-  const providers = getVegaProviders();
-
   res.json({
     name: "Butterfly Provider Server",
     status: "online",
-    vegaProviders: providers.length
+    vegaProviders: getProviders().length
   });
 });
 
 app.get("/providers", (req, res) => {
   res.json({
     version: 1,
-    providers: getVegaProviders()
+    providers: getProviders()
   });
+});
+
+app.get("/test/:provider/:module", (req, res) => {
+  try {
+    const file = path.resolve(
+      distPath,
+      req.params.provider,
+      `${req.params.module}.js`
+    );
+
+    const mod = require(file);
+
+    res.json({
+      success: true,
+      provider: req.params.provider,
+      module: req.params.module,
+      exports: Object.keys(mod)
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 app.get("/health", (req, res) => {
