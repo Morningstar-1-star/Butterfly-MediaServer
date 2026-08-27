@@ -4,6 +4,7 @@ import { execFileSync } from "child_process";
 
 const root = process.cwd();
 const vega = path.join(root, "vega-providers");
+const repo = "https://github.com/Zenda-Cross/vega-providers.git";
 
 function run(cmd, args, cwd = root) {
   execFileSync(cmd, args, {
@@ -12,24 +13,31 @@ function run(cmd, args, cwd = root) {
   });
 }
 
-if (!fs.existsSync(path.join(vega, "build-bundled.js"))) {
-  fs.rmSync(vega, { recursive: true, force: true });
+console.log("=== Vega setup ===");
 
+if (fs.existsSync(path.join(vega, ".git"))) {
+  console.log("Existing Vega repository found. Updating...");
+  run("git", ["fetch", "--depth", "1", "origin", "main"], vega);
+  run("git", ["reset", "--hard", "origin/main"], vega);
+} else {
+  if (fs.existsSync(vega)) {
+    console.log("Removing incomplete Vega directory...");
+    fs.rmSync(vega, { recursive: true, force: true });
+  }
+
+  console.log("Cloning latest Vega...");
   run("git", [
     "clone",
     "--depth", "1",
-    "https://github.com/Zenda-Cross/vega-providers.git",
+    repo,
     "vega-providers"
   ]);
-} else {
-  run("git", ["fetch", "origin", "main"], vega);
-  run("git", ["reset", "--hard", "origin/main"], vega);
 }
 
 console.log("Installing Vega dependencies...");
-run("npm", ["install", "--omit=dev"], vega);
+run("npm", ["install", "--ignore-scripts"], vega);
 
-console.log("Building latest Vega providers...");
+console.log("Building Vega providers...");
 run("npm", ["run", "build"], vega);
 
-console.log("Vega providers ready.");
+console.log("=== Vega ready ===");
