@@ -4,6 +4,7 @@ import path from "path";
 import { createRequire } from "module";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import { get as curlGet } from "curl-cffi-node";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,35 +13,103 @@ const require = createRequire(import.meta.url);
 const distPath = "./vega-providers/dist";
 const memoryStore = new Map();
 
-const providerContext = {
-  axios,
-  cheerio,
+const commonHeaders = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9"
+};
 
-  commonHeaders: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
+/*
+ * Axios-compatible wrapper.
+ * Vega providers expect axios.get/post/etc.
+ *
+ * curl-cffi-node provides Chrome TLS/HTTP2 impersonation.
+ */
+function makeResponse(r) {
+  return {
+    data: r.data,
+    status: r.status,
+    statusText: String(r.status),
+    headers: r.headers || {},
+    config: {},
+    request: {}
+  };
+}
+
+const curlAxios = {
+  async get(url, config = {}) {
+    const response = await curlGet(url, {
+      headers: {
+        ...commonHeaders,
+        ...(config.headers || {})
+      },
+      impersonate: "chrome131",
+      timeout: Math.ceil((config.timeout || 30000) / 1000),
+      followRedirects: true,
+      maxRedirects: 10
+    });
+
+    if (response.status >= 400) {
+      const error = new Error(
+        `Request failed with status code ${response.status}`
+      );
+      error.response = makeResponse(response);
+      throw error;
+    }
+
+    return makeResponse(response);
   },
 
+  async request(config = {}) {
+    const method = String(config.method || "GET").toUpperCase();
+
+    if (method === "GET") {
+      return this.get(config.url, config);
+    }
+
+    /*
+     * Keep POST/other requests on Axios for now because
+     * some Vega providers rely on Axios request semantics.
+     */
+    return axios.request(config);
+  },
+
+  get defaults() {
+    return axios.defaults;
+  }
+};
+
+const providerContext = {
+  axios: curlAxios,
+  cheerio,
+
+  commonHeaders,
+
   openWebView: async () => {
-    throw new Error("WebView challenge requires Android client");
+    throw new Error(
+      "WEBVIEW_REQUIRED: provider requires Android WebView"
+    );
   },
 
   kvStore: {
     async get(key) {
       return memoryStore.get(key);
     },
+
     async set(key, value) {
       memoryStore.set(key, value);
     },
+
     async delete(key) {
       return memoryStore.delete(key);
     },
+
     async keys() {
       return [...memoryStore.keys()];
     },
+
     async clear() {
       memoryStore.clear();
     }
@@ -78,6 +147,21 @@ function loadModule(provider, module) {
   return require(file);
 }
 
+function makeTimeout(ms) {
+  const controller = new AbortController();
+
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, ms);
+
+  return {
+    controller,
+    stop() {
+      clearTimeout(timer);
+    }
+  };
+}
+
 /* SERVER STATUS */
 
 app.get("/", (req, res) => {
@@ -88,7 +172,7 @@ app.get("/", (req, res) => {
   });
 });
 
-/* PROVIDER LIST */
+/* PROVIDERS */
 
 app.get("/providers", (req, res) => {
   res.json({
@@ -121,34 +205,27 @@ app.get("/search/:provider", async (req, res) => {
       });
     }
 
-    const controller = new AbortController();
-
-    const timer = setTimeout(
-      () => controller.abort(),
-      20000
-    );
-
-    let results;
+    const timeout = makeTimeout(20000);
 
     try {
-      results = await mod.getSearchPosts({
+      const results = await mod.getSearchPosts({
         searchQuery: query,
         page,
         providerValue: provider,
-        signal: controller.signal,
+        signal: timeout.controller.signal,
         providerContext
       });
-    } finally {
-      clearTimeout(timer);
-    }
 
-    res.json({
-      success: true,
-      provider,
-      query,
-      page,
-      results
-    });
+      res.json({
+        success: true,
+        provider,
+        query,
+        page,
+        results
+      });
+    } finally {
+      timeout.stop();
+    }
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -157,7 +234,7 @@ app.get("/search/:provider", async (req, res) => {
   }
 });
 
-/* METADATA */
+/* META */
 
 app.get("/meta/:provider", async (req, res) => {
   try {
@@ -222,32 +299,25 @@ app.get("/stream/:provider", async (req, res) => {
       });
     }
 
-    const controller = new AbortController();
-
-    const timer = setTimeout(
-      () => controller.abort(),
-      30000
-    );
-
-    let result;
+    const timeout = makeTimeout(30000);
 
     try {
-      result = await mod.getStream({
+      const streams = await mod.getStream({
         link,
         type,
-        signal: controller.signal,
+        signal: timeout.controller.signal,
         providerContext,
         isDownload: false
       });
-    } finally {
-      clearTimeout(timer);
-    }
 
-    res.json({
-      success: true,
-      provider,
-      streams: result
-    });
+      res.json({
+        success: true,
+        provider,
+        streams
+      });
+    } finally {
+      timeout.stop();
+    }
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -260,11 +330,12 @@ app.get("/stream/:provider", async (req, res) => {
 
 app.get("/health", (req, res) => {
   res.json({
-    status: "ok"
+    status: "ok",
+    vegaProviders: getProviders().length
   });
 });
 
-/* VEGA DIAGNOSTICS */
+/* REAL DIAGNOSTIC */
 
 app.get("/diagnose", async (req, res) => {
   const query = String(req.query.q || "").trim();
@@ -272,22 +343,23 @@ app.get("/diagnose", async (req, res) => {
   if (!query) {
     return res.status(400).json({
       success: false,
-      error: "Use /diagnose?q=MovieName"
+      error: "Use /diagnose?q=Avengers"
     });
   }
 
-  const providers = getProviders();
   const results = [];
 
-  for (const p of providers) {
+  for (const providerInfo of getProviders()) {
     const started = Date.now();
 
     const result = {
-      provider: p.id,
+      provider: providerInfo.id,
       status: "UNKNOWN",
       search: false,
       meta: false,
-      stream: false,
+      streamModule: false,
+      streamCount: 0,
+      playable: 0,
       error: null,
       ms: 0
     };
@@ -298,27 +370,23 @@ app.get("/diagnose", async (req, res) => {
       let posts;
 
       try {
-        posts = loadModule(p.id, "posts");
+        posts = loadModule(
+          providerInfo.id,
+          "posts"
+        );
       } catch {
         result.status = "NO_SEARCH_MODULE";
-        result.ms = Date.now() - started;
         results.push(result);
         continue;
       }
 
       if (!posts.getSearchPosts) {
         result.status = "NO_SEARCH";
-        result.ms = Date.now() - started;
         results.push(result);
         continue;
       }
 
-      const controller = new AbortController();
-
-      const timer = setTimeout(
-        () => controller.abort(),
-        20000
-      );
+      const searchTimeout = makeTimeout(20000);
 
       let search;
 
@@ -326,12 +394,12 @@ app.get("/diagnose", async (req, res) => {
         search = await posts.getSearchPosts({
           searchQuery: query,
           page: 1,
-          providerValue: p.id,
-          signal: controller.signal,
+          providerValue: providerInfo.id,
+          signal: searchTimeout.controller.signal,
           providerContext
         });
       } finally {
-        clearTimeout(timer);
+        searchTimeout.stop();
       }
 
       const items = Array.isArray(search)
@@ -343,32 +411,12 @@ app.get("/diagnose", async (req, res) => {
 
       if (!items.length) {
         result.status = "SEARCH_EMPTY";
-        result.ms = Date.now() - started;
-        results.push(result);
         continue;
       }
 
       result.search = true;
 
-      /* META */
-
-      let meta;
-
-      try {
-        meta = loadModule(p.id, "meta");
-      } catch {
-        result.status = "SEARCH_ONLY";
-        result.ms = Date.now() - started;
-        results.push(result);
-        continue;
-      }
-
-      if (!meta.getMeta) {
-        result.status = "SEARCH_ONLY";
-        result.ms = Date.now() - started;
-        results.push(result);
-        continue;
-      }
+      /* FIND LINK */
 
       const first = items[0];
 
@@ -381,90 +429,181 @@ app.get("/diagnose", async (req, res) => {
 
       if (!link) {
         result.status = "SEARCH_NO_LINK";
-        result.ms = Date.now() - started;
-        results.push(result);
         continue;
       }
 
-      const metaController = new AbortController();
+      /* META */
 
-      const metaTimer = setTimeout(
-        () => metaController.abort(),
-        20000
-      );
-
-      let metaResult;
+      let meta;
 
       try {
-        metaResult = await meta.getMeta({
-          link,
-          providerContext,
-          signal: metaController.signal
-        });
-      } finally {
-        clearTimeout(metaTimer);
+        meta = loadModule(
+          providerInfo.id,
+          "meta"
+        );
+      } catch {
+        result.status = "SEARCH_ONLY";
+        continue;
       }
 
-      if (!metaResult) {
+      if (!meta.getMeta) {
+        result.status = "SEARCH_ONLY";
+        continue;
+      }
+
+      const metaTimeout = makeTimeout(20000);
+
+      let metadata;
+
+      try {
+        metadata = await meta.getMeta({
+          link,
+          providerContext,
+          signal: metaTimeout.controller.signal
+        });
+      } finally {
+        metaTimeout.stop();
+      }
+
+      if (!metadata) {
         result.status = "META_EMPTY";
-        result.ms = Date.now() - started;
-        results.push(result);
         continue;
       }
 
       result.meta = true;
 
-      /* STREAM MODULE */
+      /* STREAM */
 
       let stream;
 
       try {
-        stream = loadModule(p.id, "stream");
+        stream = loadModule(
+          providerInfo.id,
+          "stream"
+        );
       } catch {
         result.status = "META_ONLY";
-        result.ms = Date.now() - started;
-        results.push(result);
         continue;
       }
 
       if (!stream.getStream) {
         result.status = "META_ONLY";
-        result.ms = Date.now() - started;
-        results.push(result);
         continue;
       }
 
-      result.stream = true;
-      result.status = "PASS";
-    } catch (error) {
-      result.status =
-        error?.name === "AbortError"
-          ? "TIMEOUT"
-          : "ERROR";
+      result.streamModule = true;
 
-      result.error =
-        error?.message || String(error);
+      /*
+       * IMPORTANT:
+       * Actually execute getStream().
+       */
+
+      const streamTimeout = makeTimeout(30000);
+
+      let streams;
+
+      try {
+        streams = await stream.getStream({
+          link,
+          type: metadata?.type || "movie",
+          signal: streamTimeout.controller.signal,
+          providerContext,
+          isDownload: false
+        });
+      } finally {
+        streamTimeout.stop();
+      }
+
+      const streamList = Array.isArray(streams)
+        ? streams
+        : streams?.streams ||
+          streams?.links ||
+          streams?.results ||
+          [];
+
+      result.streamCount = streamList.length;
+
+      if (!streamList.length) {
+        result.status = "STREAM_EMPTY";
+        continue;
+      }
+
+      /*
+       * We count URLs, but don't pretend that
+       * HTTP 200 automatically means playable.
+       */
+
+      const urls = streamList
+        .map(x =>
+          typeof x === "string"
+            ? x
+            : x?.link ||
+              x?.url
+        )
+        .filter(Boolean);
+
+      result.playable = urls.length;
+
+      if (!urls.length) {
+        result.status = "STREAM_NO_URL";
+        continue;
+      }
+
+      result.status = "STREAM_FOUND";
+
+    } catch (error) {
+      const message =
+        error?.message ||
+        String(error);
+
+      if (
+        message.includes("WEBVIEW_REQUIRED") ||
+        message.includes("WebView challenge")
+      ) {
+        result.status = "WEBVIEW_REQUIRED";
+      } else if (
+        error?.name === "AbortError" ||
+        message.toLowerCase().includes("timeout")
+      ) {
+        result.status = "TIMEOUT";
+      } else if (
+        message.includes("403") ||
+        message.includes("Forbidden")
+      ) {
+        result.status = "HTTP_403";
+      } else if (
+        message.includes("404") ||
+        message.includes("Not Found")
+      ) {
+        result.status = "HTTP_404";
+      } else {
+        result.status = "ERROR";
+      }
+
+      result.error = message;
     }
 
     result.ms = Date.now() - started;
     results.push(result);
   }
 
+  const counts = {};
+
+  for (const item of results) {
+    counts[item.status] =
+      (counts[item.status] || 0) + 1;
+  }
+
   res.json({
     success: true,
     query,
     total: results.length,
-    passed: results.filter(
-      x => x.status === "PASS"
-    ).length,
-    failed: results.filter(
-      x => x.status !== "PASS"
-    ).length,
+    counts,
     results
   });
 });
 
-/* START SERVER */
+/* START */
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
