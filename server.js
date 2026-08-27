@@ -4,7 +4,6 @@ import path from "path";
 import { createRequire } from "module";
 import axios from "axios";
 import * as cheerio from "cheerio";
-import { get as curlGet } from "curl-cffi-node";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,70 +20,9 @@ const commonHeaders = {
   "Accept-Language": "en-US,en;q=0.9"
 };
 
-/*
- * Axios-compatible wrapper.
- * Vega providers expect axios.get/post/etc.
- *
- * curl-cffi-node provides Chrome TLS/HTTP2 impersonation.
- */
-function makeResponse(r) {
-  return {
-    data: r.data,
-    status: r.status,
-    statusText: String(r.status),
-    headers: r.headers || {},
-    config: {},
-    request: {}
-  };
-}
-
-const curlAxios = {
-  async get(url, config = {}) {
-    const response = await curlGet(url, {
-      headers: {
-        ...commonHeaders,
-        ...(config.headers || {})
-      },
-      impersonate: "chrome131",
-      timeout: Math.ceil((config.timeout || 30000) / 1000),
-      followRedirects: true,
-      maxRedirects: 10
-    });
-
-    if (response.status >= 400) {
-      const error = new Error(
-        `Request failed with status code ${response.status}`
-      );
-      error.response = makeResponse(response);
-      throw error;
-    }
-
-    return makeResponse(response);
-  },
-
-  async request(config = {}) {
-    const method = String(config.method || "GET").toUpperCase();
-
-    if (method === "GET") {
-      return this.get(config.url, config);
-    }
-
-    /*
-     * Keep POST/other requests on Axios for now because
-     * some Vega providers rely on Axios request semantics.
-     */
-    return axios.request(config);
-  },
-
-  get defaults() {
-    return axios.defaults;
-  }
-};
-
 const providerContext = {
-  axios: curlAxios,
+  axios,
   cheerio,
-
   commonHeaders,
 
   openWebView: async () => {
@@ -160,6 +98,56 @@ function makeTimeout(ms) {
       clearTimeout(timer);
     }
   };
+}
+
+function getSearchItems(search) {
+  if (Array.isArray(search)) return search;
+
+  return (
+    search?.posts ||
+    search?.results ||
+    search?.items ||
+    search?.data ||
+    []
+  );
+}
+
+function getLink(item) {
+  if (!item) return null;
+
+  return (
+    item.link ||
+    item.url ||
+    item.href ||
+    item.post?.link ||
+    item.post?.url ||
+    item.id
+  );
+}
+
+function getStreamItems(streams) {
+  if (Array.isArray(streams)) return streams;
+
+  return (
+    streams?.streams ||
+    streams?.links ||
+    streams?.results ||
+    streams?.data ||
+    []
+  );
+}
+
+function getStreamUrl(item) {
+  if (typeof item === "string") return item;
+
+  return (
+    item?.link ||
+    item?.url ||
+    item?.file ||
+    item?.src ||
+    item?.source ||
+    null
+  );
 }
 
 /* SERVER STATUS */
@@ -239,7 +227,7 @@ app.get("/search/:provider", async (req, res) => {
 app.get("/meta/:provider", async (req, res) => {
   try {
     const provider = req.params.provider;
-    const link = req.query.link;
+    const link = String(req.query.link || "").trim();
 
     if (!link) {
       return res.status(400).json({
@@ -257,16 +245,23 @@ app.get("/meta/:provider", async (req, res) => {
       });
     }
 
-    const result = await mod.getMeta({
-      link,
-      providerContext
-    });
+    const timeout = makeTimeout(20000);
 
-    res.json({
-      success: true,
-      provider,
-      result
-    });
+    try {
+      const result = await mod.getMeta({
+        link,
+        signal: timeout.controller.signal,
+        providerContext
+      });
+
+      res.json({
+        success: true,
+        provider,
+        result
+      });
+    } finally {
+      timeout.stop();
+    }
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -280,8 +275,8 @@ app.get("/meta/:provider", async (req, res) => {
 app.get("/stream/:provider", async (req, res) => {
   try {
     const provider = req.params.provider;
-    const link = req.query.link;
-    const type = req.query.type || "movie";
+    const link = String(req.query.link || "").trim();
+    const type = String(req.query.type || "movie");
 
     if (!link) {
       return res.status(400).json({
@@ -335,7 +330,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* REAL DIAGNOSTIC */
+/* REAL VEGA DIAGNOSTIC */
 
 app.get("/diagnose", async (req, res) => {
   const query = String(req.query.q || "").trim();
@@ -359,7 +354,7 @@ app.get("/diagnose", async (req, res) => {
       meta: false,
       streamModule: false,
       streamCount: 0,
-      playable: 0,
+      streamUrls: 0,
       error: null,
       ms: 0
     };
@@ -376,12 +371,14 @@ app.get("/diagnose", async (req, res) => {
         );
       } catch {
         result.status = "NO_SEARCH_MODULE";
+        result.ms = Date.now() - started;
         results.push(result);
         continue;
       }
 
       if (!posts.getSearchPosts) {
         result.status = "NO_SEARCH";
+        result.ms = Date.now() - started;
         results.push(result);
         continue;
       }
@@ -402,33 +399,25 @@ app.get("/diagnose", async (req, res) => {
         searchTimeout.stop();
       }
 
-      const items = Array.isArray(search)
-        ? search
-        : search?.posts ||
-          search?.results ||
-          search?.items ||
-          [];
+      const items = getSearchItems(search);
 
       if (!items.length) {
         result.status = "SEARCH_EMPTY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
       result.search = true;
 
-      /* FIND LINK */
+      /* LINK */
 
-      const first = items[0];
-
-      const link =
-        first?.link ||
-        first?.url ||
-        first?.href ||
-        first?.post?.link ||
-        first?.post?.url;
+      const link = getLink(items[0]);
 
       if (!link) {
         result.status = "SEARCH_NO_LINK";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
@@ -443,11 +432,15 @@ app.get("/diagnose", async (req, res) => {
         );
       } catch {
         result.status = "SEARCH_ONLY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
       if (!meta.getMeta) {
         result.status = "SEARCH_ONLY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
@@ -458,8 +451,8 @@ app.get("/diagnose", async (req, res) => {
       try {
         metadata = await meta.getMeta({
           link,
-          providerContext,
-          signal: metaTimeout.controller.signal
+          signal: metaTimeout.controller.signal,
+          providerContext
         });
       } finally {
         metaTimeout.stop();
@@ -467,12 +460,14 @@ app.get("/diagnose", async (req, res) => {
 
       if (!metadata) {
         result.status = "META_EMPTY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
       result.meta = true;
 
-      /* STREAM */
+      /* STREAM MODULE */
 
       let stream;
 
@@ -483,20 +478,21 @@ app.get("/diagnose", async (req, res) => {
         );
       } catch {
         result.status = "META_ONLY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
       if (!stream.getStream) {
         result.status = "META_ONLY";
+        result.ms = Date.now() - started;
+        results.push(result);
         continue;
       }
 
       result.streamModule = true;
 
-      /*
-       * IMPORTANT:
-       * Actually execute getStream().
-       */
+      /* ACTUAL STREAM EXTRACTION */
 
       const streamTimeout = makeTimeout(30000);
 
@@ -505,7 +501,10 @@ app.get("/diagnose", async (req, res) => {
       try {
         streams = await stream.getStream({
           link,
-          type: metadata?.type || "movie",
+          type:
+            metadata?.type ||
+            metadata?.mediaType ||
+            "movie",
           signal: streamTimeout.controller.signal,
           providerContext,
           isDownload: false
@@ -514,68 +513,56 @@ app.get("/diagnose", async (req, res) => {
         streamTimeout.stop();
       }
 
-      const streamList = Array.isArray(streams)
-        ? streams
-        : streams?.streams ||
-          streams?.links ||
-          streams?.results ||
-          [];
+      const streamItems = getStreamItems(streams);
 
-      result.streamCount = streamList.length;
+      result.streamCount = streamItems.length;
 
-      if (!streamList.length) {
-        result.status = "STREAM_EMPTY";
-        continue;
-      }
-
-      /*
-       * We count URLs, but don't pretend that
-       * HTTP 200 automatically means playable.
-       */
-
-      const urls = streamList
-        .map(x =>
-          typeof x === "string"
-            ? x
-            : x?.link ||
-              x?.url
-        )
+      const urls = streamItems
+        .map(getStreamUrl)
         .filter(Boolean);
 
-      result.playable = urls.length;
+      result.streamUrls = urls.length;
 
-      if (!urls.length) {
+      if (!streamItems.length) {
+        result.status = "STREAM_EMPTY";
+      } else if (!urls.length) {
         result.status = "STREAM_NO_URL";
-        continue;
+      } else {
+        result.status = "STREAM_FOUND";
       }
-
-      result.status = "STREAM_FOUND";
 
     } catch (error) {
       const message =
         error?.message ||
         String(error);
 
+      const lower = message.toLowerCase();
+
       if (
-        message.includes("WEBVIEW_REQUIRED") ||
-        message.includes("WebView challenge")
+        lower.includes("webview challenge") ||
+        lower.includes("webview_required")
       ) {
         result.status = "WEBVIEW_REQUIRED";
       } else if (
         error?.name === "AbortError" ||
-        message.toLowerCase().includes("timeout")
+        lower.includes("timeout")
       ) {
         result.status = "TIMEOUT";
       } else if (
-        message.includes("403") ||
-        message.includes("Forbidden")
+        lower.includes("403") ||
+        lower.includes("forbidden")
       ) {
         result.status = "HTTP_403";
       } else if (
-        message.includes("404") ||
-        message.includes("Not Found")
+        lower.includes("404") ||
+        lower.includes("not found")
       ) {
         result.status = "HTTP_404";
+      } else if (
+        lower.includes("dns") ||
+        lower.includes("enotfound")
+      ) {
+        result.status = "DNS_ERROR";
       } else {
         result.status = "ERROR";
       }
