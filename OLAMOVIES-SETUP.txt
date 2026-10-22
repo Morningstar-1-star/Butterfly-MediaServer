@@ -1,0 +1,15 @@
+OlaMovies integration notes
+
+Changed:
+- setup-vega.js clones https://github.com/mickey2406/vega-olamovies.git
+  after the main Vega build and copies dist/olamovies into vega-providers/dist/olamovies.
+
+server.js:
+- Kept unchanged because it already discovers provider directories dynamically
+  and exposes /providers, /search/:provider, /meta/:provider, /stream/:provider,
+  and /resolve/:provider.
+
+Deploy by committing the updated setup-vega.js (and optionally this note) to GitHub.
+Render must run the existing build command. After deployment, test /providers and
+/search/olamovies?q=Inception. This does not guarantee a playable stream; hosters
+may require WebView/Cloudflare handling.
